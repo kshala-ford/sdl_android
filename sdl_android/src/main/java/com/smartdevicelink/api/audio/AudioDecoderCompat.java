@@ -4,8 +4,8 @@ import android.content.Context;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.net.Uri;
-import android.os.AsyncTask;
 import android.os.Build;
+import android.support.annotation.NonNull;
 import android.support.annotation.RequiresApi;
 import android.util.Log;
 
@@ -22,6 +22,8 @@ import java.nio.ByteBuffer;
 public class AudioDecoderCompat extends BaseAudioDecoder {
     private static final String TAG = AudioDecoderCompat.class.getSimpleName();
     private static final int DEQUEUE_TIMEOUT = 3000;
+    private static Runnable sRunnable;
+    private Thread mThread;
 
     /**
      * Creates a new object of AudioDecoder.
@@ -31,7 +33,7 @@ public class AudioDecoderCompat extends BaseAudioDecoder {
      * @param sampleType The desired sample type (8bit, 16bit, float).
      * @param listener A listener who receives the decoded audio.
      */
-    AudioDecoderCompat(Uri audioSource, Context context, int sampleRate, @SampleType int sampleType, AudioDecoderListener listener) {
+    AudioDecoderCompat(@NonNull Uri audioSource, @NonNull Context context, int sampleRate, @SampleType int sampleType, AudioDecoderListener listener) {
         super(audioSource, context, sampleRate, sampleType, listener);
     }
 
@@ -42,62 +44,55 @@ public class AudioDecoderCompat extends BaseAudioDecoder {
         try {
             initMediaComponents();
             decoder.start();
-            new DecodeAsync(this).execute();
+            mThread = new Thread(new DecoderRunnable(AudioDecoderCompat.this));
+            mThread.start();
+
         } catch (Exception e) {
             e.printStackTrace();
-            this.listener.onDecoderError(e);
-            this.listener.onDecoderFinish(false);
+            if(this.listener != null) {
+                this.listener.onDecoderError(e);
+                this.listener.onDecoderFinish(false);
+            }
             stop();
         }
     }
 
-    private static class DecodeAsync extends AsyncTask<Void, Void, Void> {
-        private WeakReference<AudioDecoderCompat> weakReference;
 
-        DecodeAsync(AudioDecoderCompat reference) {
-            this.weakReference = new WeakReference<>(reference);
+    /**
+     * Runnable to decode audio data
+     */
+    private static class DecoderRunnable implements Runnable {
+        WeakReference<AudioDecoderCompat> weakReference;
+
+        /**
+         * Decodes all audio data from source
+         * @param audioDecoderCompat instance of this class
+         */
+        DecoderRunnable(@NonNull AudioDecoderCompat audioDecoderCompat){
+            weakReference = new WeakReference<>(audioDecoderCompat);
+
         }
-
         @Override
-        protected void onPreExecute() {
-            super.onPreExecute();
-        }
-
-        @Override
-        protected void onPostExecute(Void aVoid) {
-            super.onPostExecute(aVoid);
-            AudioDecoderCompat reference = weakReference.get();
+        public void run() {
+            final AudioDecoderCompat reference = weakReference.get();
             if (reference == null) {
-                Log.w(TAG, "Weak reference actually got null...");
+                Log.w(TAG, "AudioDecoderCompat reference was null");
                 return;
             }
-
-            reference.listener.onDecoderFinish(true);
-            reference.stop();
-        }
-
-        @Override
-        protected Void doInBackground(Void... voids) {
-            AudioDecoderCompat reference = weakReference.get();
-            if (reference == null) {
-                Log.w(TAG, "Weak reference actually got null...");
-                return null;
-            }
-
-            ByteBuffer[] inputBuffersArray = reference.decoder.getInputBuffers();
-            ByteBuffer[] outputBuffersArray = reference.decoder.getOutputBuffers();
+            final ByteBuffer[] inputBuffersArray = reference.decoder.getInputBuffers();
+            final ByteBuffer[] outputBuffersArray = reference.decoder.getOutputBuffers();
             MediaCodec.BufferInfo outputBufferInfo = new MediaCodec.BufferInfo();
-            ByteBuffer inputBuffer;
-            ByteBuffer outputBuffer;
+            MediaCodec.BufferInfo inputBufferInfo;
+            ByteBuffer inputBuffer, outputBuffer;
             SampleBuffer sampleBuffer;
 
-            while (true) {
+            while (reference!= null && !reference.mThread.isInterrupted()) {
                 int inputBuffersArrayIndex = 0;
                 while (inputBuffersArrayIndex != MediaCodec.INFO_TRY_AGAIN_LATER) {
                     inputBuffersArrayIndex = reference.decoder.dequeueInputBuffer(DEQUEUE_TIMEOUT);
                     if (inputBuffersArrayIndex >= 0) {
                         inputBuffer = inputBuffersArray[inputBuffersArrayIndex];
-                        MediaCodec.BufferInfo inputBufferInfo = reference.onInputBufferAvailable(reference.extractor, inputBuffer);
+                        inputBufferInfo = reference.onInputBufferAvailable(reference.extractor, inputBuffer);
                         reference.decoder.queueInputBuffer(inputBuffersArrayIndex, inputBufferInfo.offset, inputBufferInfo.size, inputBufferInfo.presentationTimeUs, inputBufferInfo.flags);
                     }
                 }
@@ -111,7 +106,9 @@ public class AudioDecoderCompat extends BaseAudioDecoder {
                             reference.decoder.releaseOutputBuffer(outputBuffersArrayIndex, false);
                         } else if (outputBuffer.limit() > 0) {
                             sampleBuffer = reference.onOutputBufferAvailable(outputBuffer);
-                            reference.listener.onAudioDataAvailable(sampleBuffer);
+                            if(reference.listener!=null){
+                                reference.listener.onAudioDataAvailable(sampleBuffer);
+                            }
                             reference.decoder.releaseOutputBuffer(outputBuffersArrayIndex, false);
                         }
                     } else if (outputBuffersArrayIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
@@ -121,11 +118,20 @@ public class AudioDecoderCompat extends BaseAudioDecoder {
                 }
 
                 if (outputBufferInfo.flags == MediaCodec.BUFFER_FLAG_END_OF_STREAM) {
-                    break;
+                    if (reference.listener != null) {
+                        reference.listener.onDecoderFinish(true);
+                    }
+                    reference.stop();
+                    try {
+                        reference.mThread.interrupt();
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    } finally {
+                        reference.mThread = null;
+                        break;
+                    }
                 }
             }
-
-            return null;
         }
     }
 }

@@ -11,7 +11,9 @@ import android.support.annotation.NonNull;
 import android.support.annotation.RequiresApi;
 import android.util.Log;
 import com.smartdevicelink.api.audio.AudioStreamManager.SampleType;
+import com.smartdevicelink.proxy.rpc.AudioPassThruCapabilities;
 
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
@@ -20,8 +22,8 @@ import java.nio.ByteOrder;
 public abstract class BaseAudioDecoder {
     private static final String TAG = AudioDecoder.class.getSimpleName();
 
-    protected int targetSampleRate;
-    protected @SampleType int targetSampleType;
+    protected final int targetSampleRate;
+    protected @SampleType final int targetSampleType;
 
     private int outputChannelCount;
     private int outputSampleRate;
@@ -35,13 +37,23 @@ public abstract class BaseAudioDecoder {
     protected MediaExtractor extractor;
     protected MediaCodec decoder;
 
-    protected Uri audioSource;
-    protected Context context;
-    protected AudioDecoderListener listener;
+    protected final Uri audioSource;
+    protected final WeakReference<Context> contextWeakReference;
+    protected final AudioDecoderListener listener;
 
-    public BaseAudioDecoder(Uri audioSource, Context context, int sampleRate, @SampleType int sampleType, AudioDecoderListener listener) {
+    /**
+     *
+     * @param audioSource Uri of the audio source to be converted
+     * @param context the context
+     * @param sampleRate can be either 8000, 16000, 22050 or 44100
+     * @see AudioPassThruCapabilities#getSamplingRate()
+     * @param sampleType can be either UNSIGNED_8_BIT, SIGNED_16_BIT, FLOAT
+     * @see SampleType
+     * @param listener listener for event callbacks
+     */
+    public BaseAudioDecoder(@NonNull Uri audioSource, @NonNull Context context, int sampleRate, @SampleType int sampleType, AudioDecoderListener listener) {
         this.audioSource = audioSource;
-        this.context = context;
+        this.contextWeakReference = new WeakReference<>(context);
         this.listener = listener;
 
         targetSampleRate = sampleRate;
@@ -49,8 +61,16 @@ public abstract class BaseAudioDecoder {
     }
 
     protected void initMediaComponents() throws Exception {
+        if(targetSampleRate <= 0){
+            throw new InstantiationException("Target sample rate of " + targetSampleRate + " is unsupported");
+        }
+
         extractor = new MediaExtractor();
-        extractor.setDataSource(context, audioSource, null);
+        Context contextRef = contextWeakReference.get();
+        if(contextRef == null){
+            throw new InstantiationException("Context reference was null");
+        }
+        extractor.setDataSource(contextRef, audioSource, null);
         MediaFormat format = null;
         String mime = null;
 
